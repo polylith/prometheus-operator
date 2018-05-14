@@ -10,6 +10,15 @@ data:
             },
             "org_id": 1,
             "type": "file"
+        },
+        {
+            "folder": "",
+            "name": "1",
+            "options": {
+                "path": "/grafana-dashboard-definitions/1"
+            },
+            "org_id": 1,
+            "type": "file"
         }
     ]
 kind: ConfigMap

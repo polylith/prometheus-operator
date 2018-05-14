@@ -1,0 +1,41 @@
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  namespace: monitoring
+  annotations:
+    ingress.kubernetes.io/rewrite-target: /
+spec:
+  tls:
+  - hosts:
+    - grafana.platform.polylith.io
+    secretName: grafana-certificate
+  rules:
+  - host: grafana.platform.polylith.io
+    http:
+      paths:
+      - backend:
+          serviceName: grafana
+          servicePort: 3000
+---
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: Certificate
+metadata:
+  name: grafana-certificate
+  namespace: monitoring
+spec:
+  secretName: grafana-certificate
+  issuerRef:
+    name: letsencrypt-cluster-issuer
+    kind: ClusterIssuer
+  commonName: grafana.platform.polylith.io
+  dnsNames:
+  - grafana.platform.polylith.io
+  acme:
+    config:
+    - http01:
+        ingressClass: nginx
+      domains:
+      - grafana.platform.polylith.io
+---

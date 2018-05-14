@@ -11,6 +11,15 @@ data:
                 "type": "prometheus",
                 "url": "http://prometheus-k8s.monitoring.svc:9090",
                 "version": 1
+            },
+            {
+                "access": "proxy",
+                "etitable": false,
+                "name": "custom-metrics",
+                "org_id": 1,
+                "type": "prometheus",
+                "url": "http://prometheus-custom-metrics.monitoring.svc:9090",
+                "version": 1
             }
         ]
     }

@@ -41,6 +41,9 @@ spec:
         - mountPath: /grafana-dashboard-definitions/0
           name: grafana-dashboard-definitions
           readOnly: false
+        - mountPath: /grafana-dashboard-definitions/1
+          name: grafana-dashboard-definitions1
+          readOnly: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
@@ -57,3 +60,6 @@ spec:
       - configMap:
           name: grafana-dashboard-definitions
         name: grafana-dashboard-definitions
+      - configMap:
+          name: grafana-dashboard-definitions1
+        name: grafana-dashboard-definitions1
