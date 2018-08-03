@@ -16,6 +16,7 @@ package framework
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,21 +29,23 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
+	monitoringv1alpha1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1alpha1"
 	"github.com/coreos/prometheus-operator/pkg/k8sutil"
 	"github.com/pkg/errors"
 )
 
 type Framework struct {
-	KubeClient     kubernetes.Interface
-	MonClient      monitoringv1.MonitoringV1Interface
-	HTTPClient     *http.Client
-	MasterHost     string
-	Namespace      *v1.Namespace
-	OperatorPod    *v1.Pod
-	DefaultTimeout time.Duration
+	KubeClient        kubernetes.Interface
+	MonClientV1       monitoringv1.MonitoringV1Interface
+	MonClientV1alpha1 monitoringv1alpha1.MonitoringV1alpha1Interface
+	HTTPClient        *http.Client
+	MasterHost        string
+	Namespace         *v1.Namespace
+	OperatorPod       *v1.Pod
+	DefaultTimeout    time.Duration
 }
 
-// Setup setups a test framework and returns it.
+// New setups a test framework and returns it.
 func New(ns, kubeconfig, opImage string) (*Framework, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -59,9 +62,14 @@ func New(ns, kubeconfig, opImage string) (*Framework, error) {
 		return nil, errors.Wrap(err, "creating http-client failed")
 	}
 
-	mclient, err := monitoringv1.NewForConfig(&monitoringv1.DefaultCrdKinds, monitoringv1.Group, config)
+	mClientV1, err := monitoringv1.NewForConfig(&monitoringv1.DefaultCrdKinds, monitoringv1.Group, config)
 	if err != nil {
-		return nil, errors.Wrap(err, "creating monitoring client failed")
+		return nil, errors.Wrap(err, "creating v1 monitoring client failed")
+	}
+
+	mClientV1alpha1, err := monitoringv1alpha1.NewForConfig(config)
+	if err != nil {
+		return nil, errors.Wrap(err, "creating v1alpha1 monitoring client failed")
 	}
 
 	namespace, err := CreateNamespace(cli, ns)
@@ -70,12 +78,13 @@ func New(ns, kubeconfig, opImage string) (*Framework, error) {
 	}
 
 	f := &Framework{
-		MasterHost:     config.Host,
-		KubeClient:     cli,
-		MonClient:      mclient,
-		HTTPClient:     httpc,
-		Namespace:      namespace,
-		DefaultTimeout: time.Minute,
+		MasterHost:        config.Host,
+		KubeClient:        cli,
+		MonClientV1:       mClientV1,
+		MonClientV1alpha1: mClientV1alpha1,
+		HTTPClient:        httpc,
+		Namespace:         namespace,
+		DefaultTimeout:    time.Minute,
 	}
 
 	err = f.Setup(opImage)
@@ -111,7 +120,7 @@ func (f *Framework) setupPrometheusOperator(opImage string) error {
 		return errors.Wrap(err, "failed to create prometheus cluster role")
 	}
 
-	deploy, err := MakeDeployment("../../example/rbac/prometheus-operator/prometheus-operator.yaml")
+	deploy, err := MakeDeployment("../../example/rbac/prometheus-operator/prometheus-operator-deployment.yaml")
 	if err != nil {
 		return err
 	}
@@ -119,7 +128,25 @@ func (f *Framework) setupPrometheusOperator(opImage string) error {
 	if opImage != "" {
 		// Override operator image used, if specified when running tests.
 		deploy.Spec.Template.Spec.Containers[0].Image = opImage
+		repoAndTag := strings.Split(opImage, ":")
+		if len(repoAndTag) != 2 {
+			return errors.Errorf(
+				"expected operator image '%v' split by colon to result in two substrings but got '%v'",
+				opImage,
+				repoAndTag,
+			)
+		}
+		// Override Prometheus config reloader image
+		for i, arg := range deploy.Spec.Template.Spec.Containers[0].Args {
+			if strings.Contains(arg, "--prometheus-config-reloader=") {
+				deploy.Spec.Template.Spec.Containers[0].Args[i] = "--prometheus-config-reloader=" +
+					"quay.io/coreos/prometheus-config-reloader:" +
+					repoAndTag[1]
+			}
+		}
 	}
+
+	deploy.Spec.Template.Spec.Containers[0].Args = append(deploy.Spec.Template.Spec.Containers[0].Args, "--log-level=all")
 
 	err = CreateDeployment(f.KubeClient, f.Namespace.Name, deploy)
 	if err != nil {
@@ -138,6 +165,26 @@ func (f *Framework) setupPrometheusOperator(opImage string) error {
 	}
 	f.OperatorPod = &pl.Items[0]
 
+	err = k8sutil.WaitForCRDReady(f.MonClientV1.Prometheuses(v1.NamespaceAll).List)
+	if err != nil {
+		return errors.Wrap(err, "Prometheus CRD not ready: %v\n")
+	}
+
+	err = k8sutil.WaitForCRDReady(f.MonClientV1.ServiceMonitors(v1.NamespaceAll).List)
+	if err != nil {
+		return errors.Wrap(err, "ServiceMonitor CRD not ready: %v\n")
+	}
+
+	err = k8sutil.WaitForCRDReady(f.MonClientV1.PrometheusRules(v1.NamespaceAll).List)
+	if err != nil {
+		return errors.Wrap(err, "PrometheusRule CRD not ready: %v\n")
+	}
+
+	err = k8sutil.WaitForCRDReady(f.MonClientV1.Alertmanagers(v1.NamespaceAll).List)
+	if err != nil {
+		return errors.Wrap(err, "Alertmanager CRD not ready: %v\n")
+	}
+
 	return nil
 }
 
@@ -150,6 +197,20 @@ func (ctx *TestCtx) SetupPrometheusRBAC(t *testing.T, ns string, kubeClient kube
 
 	if finalizerFn, err := CreateRoleBinding(kubeClient, ns, "../framework/ressources/prometheus-role-binding.yml"); err != nil {
 		t.Fatal(errors.Wrap(err, "failed to create prometheus role binding"))
+	} else {
+		ctx.AddFinalizerFn(finalizerFn)
+	}
+}
+
+func (ctx *TestCtx) SetupPrometheusRBACGlobal(t *testing.T, ns string, kubeClient kubernetes.Interface) {
+	if finalizerFn, err := CreateServiceAccount(kubeClient, ns, "../../example/rbac/prometheus/prometheus-service-account.yaml"); err != nil {
+		t.Fatal(errors.Wrap(err, "failed to create prometheus service account"))
+	} else {
+		ctx.AddFinalizerFn(finalizerFn)
+	}
+
+	if finalizerFn, err := CreateClusterRoleBinding(kubeClient, ns, "../../example/rbac/prometheus/prometheus-cluster-role-binding.yaml"); err != nil {
+		t.Fatal(errors.Wrap(err, "failed to create prometheus cluster role binding"))
 	} else {
 		ctx.AddFinalizerFn(finalizerFn)
 	}
@@ -168,9 +229,6 @@ func (f *Framework) Teardown() error {
 	if err := f.KubeClient.Extensions().Deployments(f.Namespace.Name).Delete("prometheus-operator", nil); err != nil {
 		return err
 	}
-	if err := DeleteNamespace(f.KubeClient, f.Namespace.Name); err != nil {
-		return err
-	}
 
-	return nil
+	return DeleteNamespace(f.KubeClient, f.Namespace.Name)
 }

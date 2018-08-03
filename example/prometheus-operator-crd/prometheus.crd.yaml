@@ -12,7 +12,6 @@ spec:
   scope: Namespaced
   validation:
     openAPIV3Schema:
-      description: Prometheus defines a Prometheus deployment.
       properties:
         apiVersion:
           description: 'APIVersion defines the versioned schema of this representation
@@ -25,9 +24,24 @@ spec:
             submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
           type: string
         spec:
-          description: 'Specification of the desired behavior of the Prometheus cluster.
-            More info: https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status'
+          description: 'PrometheusSpec is a specification of the desired behavior
+            of the Prometheus cluster. More info: https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status'
           properties:
+            additionalAlertManagerConfigs:
+              description: SecretKeySelector selects a key of a Secret.
+              properties:
+                key:
+                  description: The key of the secret to select from.  Must be a valid
+                    secret key.
+                  type: string
+                name:
+                  description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                  type: string
+                optional:
+                  description: Specify whether the Secret or it's key must be defined
+                  type: boolean
+              required:
+              - key
             additionalScrapeConfigs:
               description: SecretKeySelector selects a key of a Secret.
               properties:
@@ -69,11 +83,13 @@ spec:
                         properties:
                           preference:
                             description: A null or empty node selector term matches
-                              no objects.
+                              no objects. The requirements of them are ANDed. The
+                              TopologySelectorTerm type implements a subset of the
+                              NodeSelectorTerm.
                             properties:
                               matchExpressions:
-                                description: Required. A list of node selector requirements.
-                                  The requirements are ANDed.
+                                description: A list of node selector requirements
+                                  by node's labels.
                                 items:
                                   description: A node selector requirement is a selector
                                     that contains values, a key, and an operator that
@@ -104,8 +120,39 @@ spec:
                                   - key
                                   - operator
                                 type: array
-                            required:
-                            - matchExpressions
+                              matchFields:
+                                description: A list of node selector requirements
+                                  by node's fields.
+                                items:
+                                  description: A node selector requirement is a selector
+                                    that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: The label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: Represents a key's relationship
+                                        to a set of values. Valid operators are In,
+                                        NotIn, Exists, DoesNotExist. Gt, and Lt.
+                                      type: string
+                                    values:
+                                      description: An array of string values. If the
+                                        operator is In or NotIn, the values array
+                                        must be non-empty. If the operator is Exists
+                                        or DoesNotExist, the values array must be
+                                        empty. If the operator is Gt or Lt, the values
+                                        array must have a single element, which will
+                                        be interpreted as an integer. This array is
+                                        replaced during a strategic merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                  required:
+                                  - key
+                                  - operator
+                                type: array
                           weight:
                             description: Weight associated with matching the corresponding
                               nodeSelectorTerm, in the range 1-100.
@@ -126,11 +173,13 @@ spec:
                             terms are ORed.
                           items:
                             description: A null or empty node selector term matches
-                              no objects.
+                              no objects. The requirements of them are ANDed. The
+                              TopologySelectorTerm type implements a subset of the
+                              NodeSelectorTerm.
                             properties:
                               matchExpressions:
-                                description: Required. A list of node selector requirements.
-                                  The requirements are ANDed.
+                                description: A list of node selector requirements
+                                  by node's labels.
                                 items:
                                   description: A node selector requirement is a selector
                                     that contains values, a key, and an operator that
@@ -161,8 +210,39 @@ spec:
                                   - key
                                   - operator
                                 type: array
-                            required:
-                            - matchExpressions
+                              matchFields:
+                                description: A list of node selector requirements
+                                  by node's fields.
+                                items:
+                                  description: A node selector requirement is a selector
+                                    that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: The label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: Represents a key's relationship
+                                        to a set of values. Valid operators are In,
+                                        NotIn, Exists, DoesNotExist. Gt, and Lt.
+                                      type: string
+                                    values:
+                                      description: An array of string values. If the
+                                        operator is In or NotIn, the values array
+                                        must be non-empty. If the operator is Exists
+                                        or DoesNotExist, the values array must be
+                                        empty. If the operator is Gt or Lt, the values
+                                        array must have a single element, which will
+                                        be interpreted as an integer. This array is
+                                        replaced during a strategic merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                  required:
+                                  - key
+                                  - operator
+                                type: array
                           type: array
                       required:
                       - nodeSelectorTerms
@@ -560,7 +640,10 @@ spec:
                       pathPrefix:
                         description: Prefix for the HTTP path alerts are pushed to.
                         type: string
-                      port: {}
+                      port:
+                        anyOf:
+                        - type: string
+                        - type: integer
                       scheme:
                         description: Scheme to use when firing alerts.
                         type: string
@@ -589,6 +672,76 @@ spec:
                   type: array
               required:
               - alertmanagers
+            apiserverConfig:
+              description: 'APIServerConfig defines a host and auth methods to access
+                apiserver. More info: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config'
+              properties:
+                basicAuth:
+                  description: 'BasicAuth allow an endpoint to authenticate over basic
+                    authentication More info: https://prometheus.io/docs/operating/configuration/#endpoints'
+                  properties:
+                    password:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or it's key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                    username:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or it's key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                bearerToken:
+                  description: Bearer token for accessing apiserver.
+                  type: string
+                bearerTokenFile:
+                  description: File to read bearer token for accessing apiserver.
+                  type: string
+                host:
+                  description: Host of apiserver. A valid string consisting of a hostname
+                    or IP followed by an optional port number
+                  type: string
+                tlsConfig:
+                  description: TLSConfig specifies TLS configuration parameters.
+                  properties:
+                    caFile:
+                      description: The CA cert to use for the targets.
+                      type: string
+                    certFile:
+                      description: The client cert file for the targets.
+                      type: string
+                    insecureSkipVerify:
+                      description: Disable target certificate validation.
+                      type: boolean
+                    keyFile:
+                      description: The client key file for the targets.
+                      type: string
+                    serverName:
+                      description: Used to verify the hostname for the targets.
+                      type: string
+              required:
+              - host
             baseImage:
               description: Base image to use for a Prometheus deployment.
               type: string
@@ -818,7 +971,10 @@ spec:
                               path:
                                 description: Path to access on the HTTP server.
                                 type: string
-                              port: {}
+                              port:
+                                anyOf:
+                                - type: string
+                                - type: integer
                               scheme:
                                 description: Scheme to use for connecting to the host.
                                   Defaults to HTTP.
@@ -833,7 +989,10 @@ spec:
                                 description: 'Optional: Host name to connect to, defaults
                                   to the pod IP.'
                                 type: string
-                              port: {}
+                              port:
+                                anyOf:
+                                - type: string
+                                - type: integer
                             required:
                             - port
                       preStop:
@@ -885,7 +1044,10 @@ spec:
                               path:
                                 description: Path to access on the HTTP server.
                                 type: string
-                              port: {}
+                              port:
+                                anyOf:
+                                - type: string
+                                - type: integer
                               scheme:
                                 description: Scheme to use for connecting to the host.
                                   Defaults to HTTP.
@@ -900,7 +1062,10 @@ spec:
                                 description: 'Optional: Host name to connect to, defaults
                                   to the pod IP.'
                                 type: string
-                              port: {}
+                              port:
+                                anyOf:
+                                - type: string
+                                - type: integer
                             required:
                             - port
                   livenessProbe:
@@ -958,7 +1123,10 @@ spec:
                           path:
                             description: Path to access on the HTTP server.
                             type: string
-                          port: {}
+                          port:
+                            anyOf:
+                            - type: string
+                            - type: integer
                           scheme:
                             description: Scheme to use for connecting to the host.
                               Defaults to HTTP.
@@ -989,7 +1157,10 @@ spec:
                             description: 'Optional: Host name to connect to, defaults
                               to the pod IP.'
                             type: string
-                          port: {}
+                          port:
+                            anyOf:
+                            - type: string
+                            - type: integer
                         required:
                         - port
                       timeoutSeconds:
@@ -1098,7 +1269,10 @@ spec:
                           path:
                             description: Path to access on the HTTP server.
                             type: string
-                          port: {}
+                          port:
+                            anyOf:
+                            - type: string
+                            - type: integer
                           scheme:
                             description: Scheme to use for connecting to the host.
                               Defaults to HTTP.
@@ -1129,7 +1303,10 @@ spec:
                             description: 'Optional: Host name to connect to, defaults
                               to the pod IP.'
                             type: string
-                          port: {}
+                          port:
+                            anyOf:
+                            - type: string
+                            - type: integer
                         required:
                         - port
                       timeoutSeconds:
@@ -1389,6 +1566,9 @@ spec:
                     request.
                   type: string
                 creationTimestamp:
+                  description: Time is a wrapper around time.Time which supports correct
+                    marshaling to YAML and JSON.  Wrappers are provided for many of
+                    the factory methods that the time package offers.
                   format: date-time
                   type: string
                 deletionGracePeriodSeconds:
@@ -1398,6 +1578,9 @@ spec:
                   format: int64
                   type: integer
                 deletionTimestamp:
+                  description: Time is a wrapper around time.Time which supports correct
+                    marshaling to YAML and JSON.  Wrappers are provided for many of
+                    the factory methods that the time package offers.
                   format: date-time
                   type: string
                 finalizers:
@@ -1787,6 +1970,42 @@ spec:
                   proxyUrl:
                     description: Optional ProxyURL
                     type: string
+                  queueConfig:
+                    description: QueueConfig allows the tuning of remote_write queue_config
+                      parameters. This object is referenced in the RemoteWriteSpec
+                      object.
+                    properties:
+                      batchSendDeadline:
+                        description: BatchSendDeadline is the maximum time a sample
+                          will wait in buffer.
+                        type: string
+                      capacity:
+                        description: Capacity is the number of samples to buffer per
+                          shard before we start dropping them.
+                        format: int32
+                        type: integer
+                      maxBackoff:
+                        description: MaxBackoff is the maximum retry delay.
+                        type: string
+                      maxRetries:
+                        description: MaxRetries is the maximum number of times to
+                          retry a batch on recoverable errors.
+                        format: int32
+                        type: integer
+                      maxSamplesPerSend:
+                        description: MaxSamplesPerSend is the maximum number of samples
+                          per send.
+                        format: int32
+                        type: integer
+                      maxShards:
+                        description: MaxShards is the maximum number of shards, i.e.
+                          amount of concurrency.
+                        format: int32
+                        type: integer
+                      minBackoff:
+                        description: MinBackoff is the initial retry delay. Gets doubled
+                          for every retry.
+                        type: string
                   remoteTimeout:
                     description: Timeout for requests to the remote write endpoint.
                     type: string
@@ -1876,7 +2095,8 @@ spec:
                     value. More info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/'
                   type: object
             retention:
-              description: Time duration Prometheus shall retain data for.
+              description: Time duration Prometheus shall retain data for. Default
+                is '24h'.
               type: string
             routePrefix:
               description: The route prefix Prometheus registers HTTP handlers for.
@@ -1885,6 +2105,48 @@ spec:
                 the server serves requests under a different route prefix. For example
                 for use with `kubectl proxy`.
               type: string
+            ruleNamespaceSelector:
+              description: A label selector is a label query over a set of resources.
+                The result of matchLabels and matchExpressions are ANDed. An empty
+                label selector matches all objects. A null label selector matches
+                no objects.
+              properties:
+                matchExpressions:
+                  description: matchExpressions is a list of label selector requirements.
+                    The requirements are ANDed.
+                  items:
+                    description: A label selector requirement is a selector that contains
+                      values, a key, and an operator that relates the key and values.
+                    properties:
+                      key:
+                        description: key is the label key that the selector applies
+                          to.
+                        type: string
+                      operator:
+                        description: operator represents a key's relationship to a
+                          set of values. Valid operators are In, NotIn, Exists and
+                          DoesNotExist.
+                        type: string
+                      values:
+                        description: values is an array of string values. If the operator
+                          is In or NotIn, the values array must be non-empty. If the
+                          operator is Exists or DoesNotExist, the values array must
+                          be empty. This array is replaced during a strategic merge
+                          patch.
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - key
+                    - operator
+                  type: array
+                matchLabels:
+                  description: matchLabels is a map of {key,value} pairs. A single
+                    {key,value} in the matchLabels map is equivalent to an element
+                    of matchExpressions, whose key field is "key", the operator is
+                    "In", and the values array contains only "value". The requirements
+                    are ANDed.
+                  type: object
             ruleSelector:
               description: A label selector is a label query over a set of resources.
                 The result of matchLabels and matchExpressions are ANDed. An empty
@@ -2007,6 +2269,23 @@ spec:
                   items:
                     format: int64
                     type: integer
+                  type: array
+                sysctls:
+                  description: Sysctls hold a list of namespaced sysctls used for
+                    the pod. Pods with unsupported sysctls (by the container runtime)
+                    might fail to launch.
+                  items:
+                    description: Sysctl defines a kernel parameter to be set
+                    properties:
+                      name:
+                        description: Name of a property to set
+                        type: string
+                      value:
+                        description: Value of a property to set
+                        type: string
+                    required:
+                    - name
+                    - value
                   type: array
             serviceAccountName:
               description: ServiceAccountName is the name of the ServiceAccount to
@@ -2207,6 +2486,10 @@ spec:
                             it if set in create or update request.
                           type: string
                         creationTimestamp:
+                          description: Time is a wrapper around time.Time which supports
+                            correct marshaling to YAML and JSON.  Wrappers are provided
+                            for many of the factory methods that the time package
+                            offers.
                           format: date-time
                           type: string
                         deletionGracePeriodSeconds:
@@ -2217,6 +2500,10 @@ spec:
                           format: int64
                           type: integer
                         deletionTimestamp:
+                          description: Time is a wrapper around time.Time which supports
+                            correct marshaling to YAML and JSON.  Wrappers are provided
+                            for many of the factory methods that the time package
+                            offers.
                           format: date-time
                           type: string
                         finalizers:
@@ -2589,9 +2876,17 @@ spec:
                               about state of pvc
                             properties:
                               lastProbeTime:
+                                description: Time is a wrapper around time.Time which
+                                  supports correct marshaling to YAML and JSON.  Wrappers
+                                  are provided for many of the factory methods that
+                                  the time package offers.
                                 format: date-time
                                 type: string
                               lastTransitionTime:
+                                description: Time is a wrapper around time.Time which
+                                  supports correct marshaling to YAML and JSON.  Wrappers
+                                  are provided for many of the factory methods that
+                                  the time package offers.
                                 format: date-time
                                 type: string
                               message:
@@ -2616,6 +2911,104 @@ spec:
                         phase:
                           description: Phase represents the current phase of PersistentVolumeClaim.
                           type: string
+            tag:
+              description: Tag of Prometheus container image to be deployed. Defaults
+                to the value of `version`.
+              type: string
+            thanos:
+              description: ThanosSpec defines parameters for a Prometheus server within
+                a Thanos deployment.
+              properties:
+                baseImage:
+                  description: Thanos base image if other than default.
+                  type: string
+                gcs:
+                  description: ThanosGCSSpec defines parameters for use of Google
+                    Cloud Storage (GCS) with Thanos.
+                  properties:
+                    bucket:
+                      description: Google Cloud Storage bucket name for stored blocks.
+                        If empty it won't store any block inside Google Cloud Storage.
+                      type: string
+                    credentials:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or it's key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                peers:
+                  description: Peers is a DNS name for Thanos to discover peers through.
+                  type: string
+                s3:
+                  description: ThanosS3Spec defines parameters for of AWS Simple Storage
+                    Service (S3) with Thanos. (S3 compatible services apply as well)
+                  properties:
+                    accessKey:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or it's key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                    bucket:
+                      description: S3-Compatible API bucket name for stored blocks.
+                      type: string
+                    encryptsse:
+                      description: Whether to use Server Side Encryption
+                      type: boolean
+                    endpoint:
+                      description: S3-Compatible API endpoint for stored blocks.
+                      type: string
+                    insecure:
+                      description: Whether to use an insecure connection with an S3-Compatible
+                        API.
+                      type: boolean
+                    secretKey:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or it's key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                    signatureVersion2:
+                      description: Whether to use S3 Signature Version 2; otherwise
+                        Signature Version 4 will be used.
+                      type: boolean
+                tag:
+                  description: Tag of Thanos sidecar container image to be deployed.
+                    Defaults to the value of `version`.
+                  type: string
+                version:
+                  description: Version describes the version of Thanos to use.
+                  type: string
             tolerations:
               description: If specified, the pod's tolerations.
               items:
@@ -2659,9 +3052,9 @@ spec:
               description: Version of Prometheus to be deployed.
               type: string
         status:
-          description: 'Most recent observed status of the Prometheus cluster. Read-only.
-            Not included when requesting from the apiserver, only from the Prometheus
-            Operator API itself. More info: https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status'
+          description: 'PrometheusStatus is the most recent observed status of the
+            Prometheus cluster. Read-only. Not included when requesting from the apiserver,
+            only from the Prometheus Operator API itself. More info: https://github.com/kubernetes/community/blob/master/contributors/devel/api-conventions.md#spec-and-status'
           properties:
             availableReplicas:
               description: Total number of available pods (ready for at least minReadySeconds)
@@ -2693,11 +3086,4 @@ spec:
           - updatedReplicas
           - availableReplicas
           - unavailableReplicas
-      required:
-      - spec
   version: v1
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: null

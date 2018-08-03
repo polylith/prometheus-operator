@@ -16,6 +16,7 @@ package prometheus
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	yaml "gopkg.in/yaml.v2"
@@ -25,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
+
+	"github.com/kylelemons/godebug/pretty"
 )
 
 func TestConfigGeneration(t *testing.T) {
@@ -63,7 +66,9 @@ func TestNamespaceSetCorrectly(t *testing.T) {
 		},
 	}
 
-	c := k8sSDFromServiceMonitor(sm)
+	cg := &configGenerator{}
+
+	c := cg.generateK8SSDConfig(getNamespacesFromServiceMonitor(sm), nil, nil)
 	s, err := yaml.Marshal(yaml.MapSlice{c})
 	if err != nil {
 		t.Fatal(err)
@@ -83,8 +88,89 @@ func TestNamespaceSetCorrectly(t *testing.T) {
 	}
 }
 
+func TestK8SSDConfigGeneration(t *testing.T) {
+	sm := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "testservicemonitor1",
+			Namespace: "default",
+			Labels: map[string]string{
+				"group": "group1",
+			},
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			NamespaceSelector: monitoringv1.NamespaceSelector{
+				MatchNames: []string{"test"},
+			},
+		},
+	}
+
+	cg := &configGenerator{}
+
+	testcases := []struct {
+		apiserverConfig  *monitoringv1.APIServerConfig
+		basicAuthSecrets map[string]BasicAuthCredentials
+		expected         string
+	}{
+		{
+			nil,
+			nil,
+			`kubernetes_sd_configs:
+- role: endpoints
+  namespaces:
+    names:
+    - test
+`,
+		},
+		{
+			&monitoringv1.APIServerConfig{
+				Host:            "example.com",
+				BasicAuth:       &monitoringv1.BasicAuth{},
+				BearerToken:     "bearer_token",
+				BearerTokenFile: "bearer_token_file",
+				TLSConfig:       nil,
+			},
+			map[string]BasicAuthCredentials{
+				"apiserver": {
+					"foo",
+					"bar",
+				},
+			},
+			`kubernetes_sd_configs:
+- role: endpoints
+  namespaces:
+    names:
+    - test
+  api_server: example.com
+  basic_auth:
+    username: foo
+    password: bar
+  bearer_token: bearer_token
+  bearer_token_file: bearer_token_file
+`,
+		},
+	}
+
+	for _, tc := range testcases {
+		c := cg.generateK8SSDConfig(
+			getNamespacesFromServiceMonitor(sm),
+			tc.apiserverConfig,
+			tc.basicAuthSecrets,
+		)
+		s, err := yaml.Marshal(yaml.MapSlice{c})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := string(s)
+
+		if result != tc.expected {
+			t.Fatalf("Unexpected result.\n\nGot:\n\n%s\n\nExpected:\n\n%s\n\n", result, tc.expected)
+		}
+	}
+}
+
 func TestAlertmanagerBearerToken(t *testing.T) {
-	cfg, err := generateConfig(
+	cg := &configGenerator{}
+	cfg, err := cg.generateConfig(
 		&monitoringv1.Prometheus{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test",
@@ -104,8 +190,9 @@ func TestAlertmanagerBearerToken(t *testing.T) {
 			},
 		},
 		nil,
-		0,
 		map[string]BasicAuthCredentials{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -121,6 +208,7 @@ func TestAlertmanagerBearerToken(t *testing.T) {
   external_labels:
     prometheus: default/test
     prometheus_replica: $(POD_NAME)
+rule_files: []
 scrape_configs: []
 alerting:
   alert_relabel_configs:
@@ -149,13 +237,15 @@ alerting:
 	result := string(cfg)
 
 	if expected != result {
-		t.Fatalf("Unexpected result.\n\nGot:\n\n%s\n\nExpected:\n\n%s\n\n", result, expected)
+		fmt.Println(pretty.Compare(expected, result))
+		t.Fatal("expected Prometheus configuration and actual configuration do not match")
 	}
 }
 
 func generateTestConfig(version string) ([]byte, error) {
+	cg := &configGenerator{}
 	replicas := int32(1)
-	return generateConfig(
+	return cg.generateConfig(
 		&monitoringv1.Prometheus{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test",
@@ -201,8 +291,9 @@ func generateTestConfig(version string) ([]byte, error) {
 			},
 		},
 		makeServiceMonitors(),
-		1,
 		map[string]BasicAuthCredentials{},
+		nil,
+		nil,
 		nil,
 	)
 }
@@ -225,7 +316,7 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 				},
@@ -249,7 +340,7 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 				},
@@ -273,11 +364,11 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 					Path:     "/federate",
-					Params:   map[string][]string{"metrics[]": []string{"{__name__=~\"job:.*\"}"}},
+					Params:   map[string][]string{"metrics[]": {"{__name__=~\"job:.*\"}"}},
 				},
 			},
 		},
@@ -299,16 +390,16 @@ func makeServiceMonitors() map[string]*monitoringv1.ServiceMonitor {
 				},
 			},
 			Endpoints: []monitoringv1.Endpoint{
-				monitoringv1.Endpoint{
+				{
 					Port:     "web",
 					Interval: "30s",
 					MetricRelabelConfigs: []*monitoringv1.RelabelConfig{
-						&monitoringv1.RelabelConfig{
+						{
 							Action:       "drop",
 							Regex:        "my-job-pod-.+",
 							SourceLabels: []string{"pod_name"},
 						},
-						&monitoringv1.RelabelConfig{
+						{
 							Action:       "drop",
 							Regex:        "test",
 							SourceLabels: []string{"namespace"},

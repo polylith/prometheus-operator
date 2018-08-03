@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"github.com/blang/semver"
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,19 +34,26 @@ var (
 	invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 )
 
-func sanitizeLabelName(name string) string {
-	return invalidLabelCharRE.ReplaceAllString(name, "_")
+type configGenerator struct {
+	logger log.Logger
 }
 
-func configMapRuleFileFolder(configMapNumber int) string {
-	return fmt.Sprintf("/etc/prometheus/config_out/rules/rules-%d/", configMapNumber)
+func NewConfigGenerator(logger log.Logger) *configGenerator {
+	cg := &configGenerator{
+		logger: logger,
+	}
+	return cg
+}
+
+func sanitizeLabelName(name string) string {
+	return invalidLabelCharRE.ReplaceAllString(name, "_")
 }
 
 func stringMapToMapSlice(m map[string]string) yaml.MapSlice {
 	res := yaml.MapSlice{}
 	ks := make([]string, 0)
 
-	for k, _ := range m {
+	for k := range m {
 		ks = append(ks, k)
 	}
 	sort.Strings(ks)
@@ -90,10 +99,17 @@ func buildExternalLabels(p *v1.Prometheus) yaml.MapSlice {
 	return stringMapToMapSlice(m)
 }
 
-func generateConfig(p *v1.Prometheus, mons map[string]*v1.ServiceMonitor, ruleConfigMaps int, basicAuthSecrets map[string]BasicAuthCredentials, additionalScrapeConfigs []byte) ([]byte, error) {
+func (cg *configGenerator) generateConfig(
+	p *v1.Prometheus,
+	mons map[string]*v1.ServiceMonitor,
+	basicAuthSecrets map[string]BasicAuthCredentials,
+	additionalScrapeConfigs []byte,
+	additionalAlertManagerConfigs []byte,
+	ruleConfigMapNames []string,
+) ([]byte, error) {
 	versionStr := p.Spec.Version
 	if versionStr == "" {
-		versionStr = DefaultVersion
+		versionStr = DefaultPrometheusVersion
 	}
 
 	version, err := semver.Parse(strings.TrimLeft(versionStr, "v"))
@@ -122,20 +138,18 @@ func generateConfig(p *v1.Prometheus, mons map[string]*v1.ServiceMonitor, ruleCo
 		},
 	})
 
-	if ruleConfigMaps > 0 {
-		configMaps := make([]string, ruleConfigMaps)
-		for i := 0; i < ruleConfigMaps; i++ {
-			configMaps[i] = configMapRuleFileFolder(i) + "*"
-		}
-		cfg = append(cfg, yaml.MapItem{
-			Key:   "rule_files",
-			Value: configMaps,
-		})
+	ruleFilePaths := []string{}
+	for _, name := range ruleConfigMapNames {
+		ruleFilePaths = append(ruleFilePaths, rulesDir+"/"+name+"/*.yaml")
 	}
+	cfg = append(cfg, yaml.MapItem{
+		Key:   "rule_files",
+		Value: ruleFilePaths,
+	})
 
 	identifiers := make([]string, len(mons))
 	i := 0
-	for k, _ := range mons {
+	for k := range mons {
 		identifiers[i] = k
 		i++
 	}
@@ -143,29 +157,39 @@ func generateConfig(p *v1.Prometheus, mons map[string]*v1.ServiceMonitor, ruleCo
 	// Sorting ensures, that we always generate the config in the same order.
 	sort.Strings(identifiers)
 
+	apiserverConfig := p.Spec.APIServerConfig
+
 	var scrapeConfigs []yaml.MapSlice
 	for _, identifier := range identifiers {
 		for i, ep := range mons[identifier].Spec.Endpoints {
-			scrapeConfigs = append(scrapeConfigs, generateServiceMonitorConfig(version, mons[identifier], ep, i, basicAuthSecrets))
+			scrapeConfigs = append(scrapeConfigs, cg.generateServiceMonitorConfig(version, mons[identifier], ep, i, apiserverConfig, basicAuthSecrets))
 		}
 	}
 	var alertmanagerConfigs []yaml.MapSlice
 	if p.Spec.Alerting != nil {
 		for _, am := range p.Spec.Alerting.Alertmanagers {
-			alertmanagerConfigs = append(alertmanagerConfigs, generateAlertmanagerConfig(version, am))
+			alertmanagerConfigs = append(alertmanagerConfigs, cg.generateAlertmanagerConfig(version, am, apiserverConfig, basicAuthSecrets))
 		}
 	}
 
 	var additionalScrapeConfigsYaml []yaml.MapSlice
 	err = yaml.Unmarshal([]byte(additionalScrapeConfigs), &additionalScrapeConfigsYaml)
 	if err != nil {
-		errors.Wrap(err, "unmarshalling additional scrape configs failed")
+		return nil, errors.Wrap(err, "unmarshalling additional scrape configs failed")
 	}
 
 	cfg = append(cfg, yaml.MapItem{
 		Key:   "scrape_configs",
 		Value: append(scrapeConfigs, additionalScrapeConfigsYaml...),
 	})
+
+	var additionalAlertManagerConfigsYaml []yaml.MapSlice
+	err = yaml.Unmarshal([]byte(additionalAlertManagerConfigs), &additionalAlertManagerConfigsYaml)
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshalling additional alert manager configs failed")
+	}
+
+	alertmanagerConfigs = append(alertmanagerConfigs, additionalAlertManagerConfigsYaml...)
 
 	var alertRelabelConfigs []yaml.MapSlice
 
@@ -193,17 +217,17 @@ func generateConfig(p *v1.Prometheus, mons map[string]*v1.ServiceMonitor, ruleCo
 	})
 
 	if len(p.Spec.RemoteWrite) > 0 && version.Major >= 2 {
-		cfg = append(cfg, generateRemoteWriteConfig(version, p.Spec.RemoteWrite, basicAuthSecrets))
+		cfg = append(cfg, cg.generateRemoteWriteConfig(version, p.Spec.RemoteWrite, basicAuthSecrets))
 	}
 
 	if len(p.Spec.RemoteRead) > 0 && version.Major >= 2 {
-		cfg = append(cfg, generateRemoteReadConfig(version, p.Spec.RemoteRead, basicAuthSecrets))
+		cfg = append(cfg, cg.generateRemoteReadConfig(version, p.Spec.RemoteRead, basicAuthSecrets))
 	}
 
 	return yaml.Marshal(cfg)
 }
 
-func generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, ep v1.Endpoint, i int, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapSlice {
+func (cg *configGenerator) generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, ep v1.Endpoint, i int, apiserverConfig *v1.APIServerConfig, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapSlice {
 	cfg := yaml.MapSlice{
 		{
 			Key:   "job_name",
@@ -218,12 +242,15 @@ func generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, 
 	switch version.Major {
 	case 1:
 		if version.Minor < 7 {
-			cfg = append(cfg, k8sSDAllNamespaces())
+			if apiserverConfig != nil {
+				level.Info(cg.logger).Log("msg", "custom apiserver config is set but it will not take effect because prometheus version is < 1.7")
+			}
+			cfg = append(cfg, cg.generateK8SSDConfig(nil, nil, nil))
 		} else {
-			cfg = append(cfg, k8sSDFromServiceMonitor(m))
+			cfg = append(cfg, cg.generateK8SSDConfig(getNamespacesFromServiceMonitor(m), apiserverConfig, basicAuthSecrets))
 		}
 	case 2:
-		cfg = append(cfg, k8sSDFromServiceMonitor(m))
+		cfg = append(cfg, cg.generateK8SSDConfig(getNamespacesFromServiceMonitor(m), apiserverConfig, basicAuthSecrets))
 	}
 
 	if ep.Interval != "" {
@@ -234,6 +261,9 @@ func generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, 
 	}
 	if ep.Path != "" {
 		cfg = append(cfg, yaml.MapItem{Key: "metrics_path", Value: ep.Path})
+	}
+	if ep.ProxyURL != nil {
+		cfg = append(cfg, yaml.MapItem{Key: "proxy_url", Value: ep.ProxyURL})
 	}
 	if ep.Params != nil {
 		cfg = append(cfg, yaml.MapItem{Key: "params", Value: ep.Params})
@@ -361,15 +391,15 @@ func generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, 
 
 	// Relabel namespace and pod and service labels into proper labels.
 	relabelings = append(relabelings, []yaml.MapSlice{
-		yaml.MapSlice{
+		{
 			{Key: "source_labels", Value: []string{"__meta_kubernetes_namespace"}},
 			{Key: "target_label", Value: "namespace"},
 		},
-		yaml.MapSlice{
+		{
 			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_name"}},
 			{Key: "target_label", Value: "pod"},
 		},
-		yaml.MapSlice{
+		{
 			{Key: "source_labels", Value: []string{"__meta_kubernetes_service_name"}},
 			{Key: "target_label", Value: "service"},
 		},
@@ -460,7 +490,7 @@ func generateServiceMonitorConfig(version semver.Version, m *v1.ServiceMonitor, 
 	return cfg
 }
 
-func k8sSDFromServiceMonitor(m *v1.ServiceMonitor) yaml.MapItem {
+func getNamespacesFromServiceMonitor(m *v1.ServiceMonitor) []string {
 	nsel := m.Spec.NamespaceSelector
 	namespaces := []string{}
 	if !nsel.Any && len(nsel.MatchNames) == 0 {
@@ -471,48 +501,65 @@ func k8sSDFromServiceMonitor(m *v1.ServiceMonitor) yaml.MapItem {
 			namespaces = append(namespaces, nsel.MatchNames[i])
 		}
 	}
-
-	return k8sSDWithNamespaces(namespaces)
+	return namespaces
 }
 
-func k8sSDWithNamespaces(namespaces []string) yaml.MapItem {
-	return yaml.MapItem{
-		Key: "kubernetes_sd_configs",
-		Value: []yaml.MapSlice{
-			yaml.MapSlice{
+func (cg *configGenerator) generateK8SSDConfig(namespaces []string, apiserverConfig *v1.APIServerConfig, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapItem {
+	k8sSDConfig := yaml.MapSlice{
+		{
+			Key:   "role",
+			Value: "endpoints",
+		},
+	}
+
+	if namespaces != nil {
+		k8sSDConfig = append(k8sSDConfig, yaml.MapItem{
+			Key: "namespaces",
+			Value: yaml.MapSlice{
 				{
-					Key:   "role",
-					Value: "endpoints",
+					Key:   "names",
+					Value: namespaces,
 				},
-				{
-					Key: "namespaces",
-					Value: yaml.MapSlice{
-						{
-							Key:   "names",
-							Value: namespaces,
-						},
+			},
+		})
+	}
+
+	if apiserverConfig != nil {
+		k8sSDConfig = append(k8sSDConfig, yaml.MapItem{
+			Key: "api_server", Value: apiserverConfig.Host,
+		})
+
+		if apiserverConfig.BasicAuth != nil && basicAuthSecrets != nil {
+			if s, ok := basicAuthSecrets["apiserver"]; ok {
+				k8sSDConfig = append(k8sSDConfig, yaml.MapItem{
+					Key: "basic_auth", Value: yaml.MapSlice{
+						{Key: "username", Value: s.username},
+						{Key: "password", Value: s.password},
 					},
-				},
-			},
-		},
-	}
-}
+				})
+			}
+		}
 
-func k8sSDAllNamespaces() yaml.MapItem {
+		if apiserverConfig.BearerToken != "" {
+			k8sSDConfig = append(k8sSDConfig, yaml.MapItem{Key: "bearer_token", Value: apiserverConfig.BearerToken})
+		}
+
+		if apiserverConfig.BearerTokenFile != "" {
+			k8sSDConfig = append(k8sSDConfig, yaml.MapItem{Key: "bearer_token_file", Value: apiserverConfig.BearerTokenFile})
+		}
+
+		k8sSDConfig = addTLStoYaml(k8sSDConfig, apiserverConfig.TLSConfig)
+	}
+
 	return yaml.MapItem{
 		Key: "kubernetes_sd_configs",
 		Value: []yaml.MapSlice{
-			yaml.MapSlice{
-				{
-					Key:   "role",
-					Value: "endpoints",
-				},
-			},
+			k8sSDConfig,
 		},
 	}
 }
 
-func generateAlertmanagerConfig(version semver.Version, am v1.AlertmanagerEndpoints) yaml.MapSlice {
+func (cg *configGenerator) generateAlertmanagerConfig(version semver.Version, am v1.AlertmanagerEndpoints, apiserverConfig *v1.APIServerConfig, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapSlice {
 	if am.Scheme == "" {
 		am.Scheme = "http"
 	}
@@ -531,12 +578,15 @@ func generateAlertmanagerConfig(version semver.Version, am v1.AlertmanagerEndpoi
 	switch version.Major {
 	case 1:
 		if version.Minor < 7 {
-			cfg = append(cfg, k8sSDAllNamespaces())
+			if apiserverConfig != nil {
+				level.Info(cg.logger).Log("msg", "custom apiserver config is set but it will not take effect because prometheus version is < 1.7")
+			}
+			cfg = append(cfg, cg.generateK8SSDConfig(nil, nil, nil))
 		} else {
-			cfg = append(cfg, k8sSDWithNamespaces([]string{am.Namespace}))
+			cfg = append(cfg, cg.generateK8SSDConfig([]string{am.Namespace}, apiserverConfig, basicAuthSecrets))
 		}
 	case 2:
-		cfg = append(cfg, k8sSDWithNamespaces([]string{am.Namespace}))
+		cfg = append(cfg, cg.generateK8SSDConfig([]string{am.Namespace}, apiserverConfig, basicAuthSecrets))
 	}
 
 	if am.BearerTokenFile != "" {
@@ -560,7 +610,7 @@ func generateAlertmanagerConfig(version semver.Version, am v1.AlertmanagerEndpoi
 	} else if am.Port.IntVal != 0 {
 		relabelings = append(relabelings, yaml.MapSlice{
 			{Key: "action", Value: "keep"},
-			{Key: "source_labels", Value: []string{"__meta_kubernetes_container_port_number"}},
+			{Key: "source_labels", Value: []string{"__meta_kubernetes_pod_container_port_number"}},
 			{Key: "regex", Value: am.Port.String()},
 		})
 	}
@@ -578,7 +628,7 @@ func generateAlertmanagerConfig(version semver.Version, am v1.AlertmanagerEndpoi
 	return cfg
 }
 
-func generateRemoteReadConfig(version semver.Version, specs []v1.RemoteReadSpec, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapItem {
+func (cg *configGenerator) generateRemoteReadConfig(version semver.Version, specs []v1.RemoteReadSpec, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapItem {
 
 	cfgs := []yaml.MapSlice{}
 
@@ -632,7 +682,7 @@ func generateRemoteReadConfig(version semver.Version, specs []v1.RemoteReadSpec,
 	}
 }
 
-func generateRemoteWriteConfig(version semver.Version, specs []v1.RemoteWriteSpec, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapItem {
+func (cg *configGenerator) generateRemoteWriteConfig(version semver.Version, specs []v1.RemoteWriteSpec, basicAuthSecrets map[string]BasicAuthCredentials) yaml.MapItem {
 
 	cfgs := []yaml.MapSlice{}
 
@@ -707,6 +757,40 @@ func generateRemoteWriteConfig(version semver.Version, specs []v1.RemoteWriteSpe
 
 		if spec.ProxyURL != "" {
 			cfg = append(cfg, yaml.MapItem{Key: "proxy_url", Value: spec.ProxyURL})
+		}
+
+		if spec.QueueConfig != nil {
+			queueConfig := yaml.MapSlice{}
+
+			if spec.QueueConfig.Capacity != int(0) {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "capacity", Value: spec.QueueConfig.Capacity})
+			}
+
+			if spec.QueueConfig.MaxShards != int(0) {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "max_shards", Value: spec.QueueConfig.MaxShards})
+			}
+
+			if spec.QueueConfig.MaxSamplesPerSend != int(0) {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "max_samples_per_send", Value: spec.QueueConfig.MaxSamplesPerSend})
+			}
+
+			if spec.QueueConfig.BatchSendDeadline != "" {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "batch_send_deadline", Value: spec.QueueConfig.BatchSendDeadline})
+			}
+
+			if spec.QueueConfig.MaxRetries != int(0) {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "max_retries", Value: spec.QueueConfig.MaxRetries})
+			}
+
+			if spec.QueueConfig.MinBackoff != "" {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "min_backoff", Value: spec.QueueConfig.MinBackoff})
+			}
+
+			if spec.QueueConfig.MaxBackoff != "" {
+				queueConfig = append(queueConfig, yaml.MapItem{Key: "max_backoff", Value: spec.QueueConfig.MaxBackoff})
+			}
+
+			cfg = append(cfg, yaml.MapItem{Key: "queue_config", Value: queueConfig})
 		}
 
 		cfgs = append(cfgs, cfg)

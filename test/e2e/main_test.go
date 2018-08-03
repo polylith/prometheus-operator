@@ -20,9 +20,6 @@ import (
 	"os"
 	"testing"
 
-	"k8s.io/api/core/v1"
-
-	"github.com/coreos/prometheus-operator/pkg/k8sutil"
 	operatorFramework "github.com/coreos/prometheus-operator/test/framework"
 )
 
@@ -38,8 +35,8 @@ func TestMain(m *testing.M) {
 	flag.Parse()
 
 	var (
-		err  error
-		code int = 0
+		err      error
+		exitCode int
 	)
 
 	if framework, err = operatorFramework.New(*ns, *kubeconfig, *opImage); err != nil {
@@ -47,31 +44,43 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	err = k8sutil.WaitForCRDReady(framework.MonClient.Prometheuses(v1.NamespaceAll).List)
-	if err != nil {
-		log.Printf("Prometheus CRD not ready: %v\n", err)
-		os.Exit(1)
-	}
-
-	err = k8sutil.WaitForCRDReady(framework.MonClient.ServiceMonitors(v1.NamespaceAll).List)
-	if err != nil {
-		log.Printf("ServiceMonitor CRD not ready: %v\n", err)
-		os.Exit(1)
-	}
-
-	err = k8sutil.WaitForCRDReady(framework.MonClient.Alertmanagers(v1.NamespaceAll).List)
-	if err != nil {
-		log.Printf("Alertmanagers CRD not ready: %v\n", err)
-		os.Exit(1)
-	}
-
 	defer func() {
+		if exitCode != 0 {
+			if err := framework.PrintEvents(); err != nil {
+				log.Printf("failed to print events: %v", err)
+			}
+			if err := framework.PrintPodLogs(framework.Namespace.Name, framework.OperatorPod.Name); err != nil {
+				log.Printf("failed to print Prometheus Operator logs: %v", err)
+			}
+		}
+
 		if err := framework.Teardown(); err != nil {
 			log.Printf("failed to teardown framework: %v\n", err)
-			os.Exit(1)
+			exitCode = 1
 		}
-		os.Exit(code)
+
+		os.Exit(exitCode)
 	}()
 
-	code = m.Run()
+	exitCode = m.Run()
+
+	// Check if Prometheus Operator ever restarted.
+	restarts, err := framework.GetRestartCount(framework.Namespace.Name, framework.OperatorPod.Name)
+	if err != nil {
+		log.Printf("failed to retrieve restart count of Prometheus Operator pod: %v", err)
+		exitCode = 1
+	}
+	if len(restarts) != 1 {
+		log.Printf("expected to have 1 container but got %d", len(restarts))
+		exitCode = 1
+	}
+	for _, restart := range restarts {
+		if restart != 0 {
+			log.Printf(
+				"expected Prometheus Operator to never restart during entire test execution but got %d restarts",
+				restart,
+			)
+			exitCode = 1
+		}
+	}
 }

@@ -11,7 +11,6 @@ spec:
   scope: Namespaced
   validation:
     openAPIV3Schema:
-      description: ServiceMonitor defines monitoring for a set of services.
       properties:
         apiVersion:
           description: 'APIVersion defines the versioned schema of this representation
@@ -133,13 +132,20 @@ spec:
                     description: Name of the service port this endpoint refers to.
                       Mutually exclusive with targetPort.
                     type: string
+                  proxyUrl:
+                    description: ProxyURL eg http://proxyserver:2195 Directs scrapes
+                      to proxy through this endpoint.
+                    type: string
                   scheme:
                     description: HTTP scheme to use for scraping.
                     type: string
                   scrapeTimeout:
                     description: Timeout after which the scrape is ended
                     type: string
-                  targetPort: {}
+                  targetPort:
+                    anyOf:
+                    - type: string
+                    - type: integer
                   tlsConfig:
                     description: TLSConfig specifies TLS configuration parameters.
                     properties:
@@ -226,11 +232,4 @@ spec:
           required:
           - endpoints
           - selector
-      required:
-      - spec
   version: v1
-status:
-  acceptedNames:
-    kind: ""
-    plural: ""
-  conditions: null

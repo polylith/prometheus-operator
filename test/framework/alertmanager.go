@@ -17,8 +17,8 @@ package framework
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"strings"
 	"time"
 
 	"k8s.io/api/core/v1"
@@ -80,7 +80,7 @@ func (f *Framework) MakeAlertmanagerService(name, group string, serviceType v1.S
 		Spec: v1.ServiceSpec{
 			Type: serviceType,
 			Ports: []v1.ServicePort{
-				v1.ServicePort{
+				{
 					Name:       "web",
 					Port:       9093,
 					TargetPort: intstr.FromString("web"),
@@ -132,7 +132,7 @@ func (f *Framework) CreateAlertmanagerAndWaitUntilReady(ns string, a *monitoring
 		return errors.Wrap(err, fmt.Sprintf("creating alertmanager config secret %v failed", s.Name))
 	}
 
-	_, err = f.MonClient.Alertmanagers(ns).Create(a)
+	_, err = f.MonClientV1.Alertmanagers(ns).Create(a)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("creating alertmanager %v failed", a.Name))
 	}
@@ -153,7 +153,7 @@ func (f *Framework) WaitForAlertmanagerReady(ns, name string, replicas int) erro
 }
 
 func (f *Framework) UpdateAlertmanagerAndWaitUntilReady(ns string, a *monitoringv1.Alertmanager) error {
-	_, err := f.MonClient.Alertmanagers(ns).Update(a)
+	_, err := f.MonClientV1.Alertmanagers(ns).Update(a)
 	if err != nil {
 		return err
 	}
@@ -173,12 +173,12 @@ func (f *Framework) UpdateAlertmanagerAndWaitUntilReady(ns string, a *monitoring
 }
 
 func (f *Framework) DeleteAlertmanagerAndWaitUntilGone(ns, name string) error {
-	_, err := f.MonClient.Alertmanagers(ns).Get(name, metav1.GetOptions{})
+	_, err := f.MonClientV1.Alertmanagers(ns).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("requesting Alertmanager tpr %v failed", name))
 	}
 
-	if err := f.MonClient.Alertmanagers(ns).Delete(name, nil); err != nil {
+	if err := f.MonClientV1.Alertmanagers(ns).Delete(name, nil); err != nil {
 		return errors.Wrap(err, fmt.Sprintf("deleting Alertmanager tpr %v failed", name))
 	}
 
@@ -215,7 +215,7 @@ func (f *Framework) WaitForAlertmanagerInitializedMesh(ns, name string, amountPe
 
 func (f *Framework) GetAlertmanagerConfig(ns, n string) (amAPIStatusResp, error) {
 	var amStatus amAPIStatusResp
-	request := ProxyGetPod(f.KubeClient, ns, n, "9093", "/api/v1/status")
+	request := ProxyGetPod(f.KubeClient, ns, n, "web", "/api/v1/status")
 	resp, err := request.DoRaw()
 	if err != nil {
 		return amStatus, err
@@ -233,8 +233,8 @@ func (f *Framework) CreateSilence(ns, n string) (string, error) {
 
 	request := ProxyPostPod(
 		f.KubeClient, ns, n,
-		"9093", "/api/v1/silences",
-		"{\"id\":\"\",\"createdBy\":\"Max Mustermann\",\"comment\":\"1234\",\"startsAt\":\"2030-04-09T09:16:15.114Z\",\"endsAt\":\"2031-04-09T11:16:15.114Z\",\"matchers\":[{\"name\":\"test\",\"value\":\"123\",\"isRegex\":false}]}",
+		"web", "/api/v1/silences",
+		`{"id":"","createdBy":"Max Mustermann","comment":"1234","startsAt":"2030-04-09T09:16:15.114Z","endsAt":"2031-04-09T11:16:15.114Z","matchers":[{"name":"test","value":"123","isRegex":false}]}`,
 	)
 	resp, err := request.DoRaw()
 	if err != nil {
@@ -258,7 +258,7 @@ func (f *Framework) CreateSilence(ns, n string) (string, error) {
 func (f *Framework) GetSilences(ns, n string) ([]amAPISil, error) {
 	var getSilencesResponse amAPIGetSilResp
 
-	request := ProxyGetPod(f.KubeClient, ns, n, "9093", "/api/v1/silences")
+	request := ProxyGetPod(f.KubeClient, ns, n, "web", "/api/v1/silences")
 	resp, err := request.DoRaw()
 	if err != nil {
 		return getSilencesResponse.Data, err
@@ -278,21 +278,29 @@ func (f *Framework) GetSilences(ns, n string) ([]amAPISil, error) {
 	return getSilencesResponse.Data, nil
 }
 
-func (f *Framework) WaitForSpecificAlertmanagerConfig(ns, amName string, expectedConfig string) error {
-	return wait.Poll(10*time.Second, time.Minute*5, func() (bool, error) {
+// WaitForAlertmanagerConfigToContainString retrieves the Alertmanager
+// configuration via the Alertmanager's API and checks if it contains the given
+// string.
+func (f *Framework) WaitForAlertmanagerConfigToContainString(ns, amName, expectedString string) error {
+	var pollError error
+	err := wait.Poll(10*time.Second, time.Minute*5, func() (bool, error) {
 		config, err := f.GetAlertmanagerConfig(ns, "alertmanager-"+amName+"-0")
 		if err != nil {
 			return false, err
 		}
 
-		if config.Data.ConfigYAML == expectedConfig {
+		if strings.Contains(config.Data.ConfigYAML, expectedString) {
 			return true, nil
 		}
 
-		log.Printf("\n\nFound:\n\n%#+v\n\nExpected:\n\n%#+v\n\n", config.Data.ConfigYAML, expectedConfig)
-
 		return false, nil
 	})
+
+	if err != nil {
+		return fmt.Errorf("failed to wait for alertmanager config to contain %q: %v: %v", expectedString, err, pollError)
+	}
+
+	return nil
 }
 
 type amAPICreateSilResp struct {
@@ -328,9 +336,8 @@ type amAPIStatusData struct {
 func (s *amAPIStatusData) getAmountPeers() int {
 	if s.MeshStatus != nil {
 		return len(s.MeshStatus.Peers)
-	} else {
-		return len(s.ClusterStatus.Peers)
 	}
+	return len(s.ClusterStatus.Peers)
 }
 
 type clusterStatus struct {

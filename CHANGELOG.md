@@ -1,3 +1,59 @@
+# Upcoming
+
+* [CHANGE] Deprecate specification of Prometheus rules via ConfigMaps in favor of `PrometheusRule` CRDs
+
+## 0.22.2 / 2018-07-24
+
+[BUGFIX] Do not migrate rule config map for Prometheus statefulset on rule config map to PrometheusRule migration (#1679)
+
+## 0.22.1 / 2018-07-19
+
+* [ENHANCEMENT] Enable operation when CRDs are created externally (#1640)
+* [BUGFIX] Do not watch for new namespaces if a specific namespace has been selected (#1640)
+
+## 0.22.0 / 2018-07-09
+
+* [FEATURE] Allow setting volume name via volumetemplateclaimtemplate in prom and alertmanager (#1538)
+* [FEATURE] Allow setting custom tags of container images (#1584) 
+* [ENHANCEMENT] Update default Thanos to v0.1.0-rc.2 (#1585)
+* [ENHANCEMENT] Split rule config map mounted into Prometheus if it exceeds Kubernetes config map limit (#1562)
+* [BUGFIX] Mount Prometheus data volume into Thanos sidecar & pass correct path to Thanos sidecar (#1583)
+
+## 0.21.0 / 2018-06-28
+
+* [CHANGE] Default to Prometheus v2.3.1.
+* [CHANGE] Default to Alertmanager v0.15.0.
+* [FEATURE] Make remote write queue configurations configurable.
+* [FEATURE] Add Thanos integration (experimental).
+* [BUGFIX] Fix usage of console templates and libraries.
+
+## 0.20.0 / 2018-06-05
+
+With this release we introduce a new Custom Resource Definition - the
+`PrometheusRule` CRD. It addresses the need for rule syntax validation and rule
+selection accross namespaces. `PrometheusRule` replaces the configuration of
+Prometheus rules via K8s ConfigMaps. There are two migration paths:
+
+1. Automated live migration: If the Prometheus Operator finds Kubernetes
+   ConfigMaps that match the `RuleSelector` in a `Prometheus` specification, it
+   will convert them to matching `PrometheusRule` resources.
+
+2. Manual migration: We provide a basic CLI tool to convert Kubernetes
+   ConfigMaps to `PrometheusRule` resources.
+
+```bash
+go get -u github.com/coreos/prometheus-operator/cmd/po-rule-migration
+po-rule-migration \
+--rule-config-map=<path-to-config-map> \
+--rule-crds-destination=<path-to-rule-crd-destination>
+```
+
+* [FEATURE] Add leveled logging to Prometheus Operator (#1277)
+* [FEATURE] Allow additional Alertmanager configuration in Prometheus CRD (#1338)
+* [FEATURE] Introduce `PrometheusRule` Custom Resource Definition (#1333)
+* [ENHANCEMENT] Allow Prometheus to consider all namespaces to find ServiceMonitors (#1278)
+* [BUGFIX] Do not attempt to set default memory request for Prometheus 2.0 (#1275)
+
 ## 0.19.0 / 2018-04-25
 
 * [FEATURE] Allow specifying additional Prometheus scrape configs via secret (#1246)

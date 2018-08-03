@@ -1,12 +1,12 @@
 dependencies:
   - name: alertmanager
-    version: 0.1.2
+    version: 0.1.6
     #e2e-repository: file://../alertmanager
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
     condition: deployAlertManager
 
   - name: prometheus
-    version: 0.0.38
+    version: 0.0.50
     #e2e-repository: file://../prometheus
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
 
@@ -17,9 +17,10 @@ dependencies:
     condition: deployCoreDNS
 
   - name: exporter-kube-controller-manager
-    version: 0.1.9
+    version: 0.1.10
     #e2e-repository: file://../exporter-kube-controller-manager
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
+    condition: deployKubeControllerManager
 
   - name: exporter-kube-dns
     version: 0.1.7
@@ -28,38 +29,42 @@ dependencies:
     condition: deployKubeDNS
 
   - name: exporter-kube-etcd
-    version: 0.1.11
+    version: 0.1.15
     #e2e-repository: file://../exporter-kube-etcd
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
+    condition: deployKubeEtcd
 
   - name: exporter-kube-scheduler
-    version: 0.1.8
+    version: 0.1.9
     #e2e-repository: file://../exporter-kube-scheduler
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
+    condition: deployKubeScheduler
 
   - name: exporter-kube-state
-    version: 0.2.2
+    version: 0.2.5
     #e2e-repository: file://../exporter-kube-state
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
+    condition: deployKubeState
 
   - name: exporter-kubelets
-    version: 0.2.10
+    version: 0.2.11
     #e2e-repository: file://../exporter-kubelets
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
+    condition: deployKubelets
 
   - name: exporter-kubernetes
-    version: 0.1.9
+    version: 0.1.10
     #e2e-repository: file://../exporter-kubernetes
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
 
   - name: exporter-node
-    version: 0.3.2
+    version: 0.4.6
     #e2e-repository: file://../exporter-node
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
     condition: deployExporterNode
 
   - name: grafana
-    version: 0.0.30
+    version: 0.0.36
     #e2e-repository: file://../grafana
     repository: https://s3-eu-west-1.amazonaws.com/coreos-charts/stable/
     condition: deployGrafana

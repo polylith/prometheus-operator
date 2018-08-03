@@ -28,7 +28,8 @@ import (
 
 var (
 	defaultTestConfig = Config{
-		ConfigReloaderImage: "quay.io/coreos/configmap-reload:latest",
+		ConfigReloaderImage:          "quay.io/coreos/configmap-reload:latest",
+		AlertmanagerDefaultBaseImage: "quay.io/prometheus/alertmanager",
 	}
 )
 
@@ -391,6 +392,59 @@ func TestAdditionalSecretsMounted(t *testing.T) {
 
 	if !(secret1Found && secret2Found) {
 		t.Fatal("Additional secrets were not found.")
+	}
+}
+
+func TestTagAndVersion(t *testing.T) {
+	sset, err := makeStatefulSet(&monitoringv1.Alertmanager{
+		Spec: monitoringv1.AlertmanagerSpec{
+			Tag:     "my-unrelated-tag",
+			Version: "v0.15.0",
+		},
+	}, nil, defaultTestConfig)
+	if err != nil {
+		t.Fatalf("Unexpected error while making StatefulSet: %v", err)
+	}
+
+	image := sset.Spec.Template.Spec.Containers[0].Image
+	expected := "quay.io/prometheus/alertmanager:my-unrelated-tag"
+	if image != expected {
+		t.Fatalf("Unexpected container image.\n\nExpected: %s\n\nGot: %s", expected, image)
+	}
+}
+
+func TestRetention(t *testing.T) {
+	tests := []struct {
+		specRetention     string
+		expectedRetention string
+	}{
+		{"", "120h"},
+		{"1d", "1d"},
+	}
+
+	for _, test := range tests {
+		sset, err := makeStatefulSet(&monitoringv1.Alertmanager{
+			Spec: monitoringv1.AlertmanagerSpec{
+				Retention: test.specRetention,
+			},
+		}, nil, defaultTestConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		amArgs := sset.Spec.Template.Spec.Containers[0].Args
+		expectedRetentionArg := fmt.Sprintf("--data.retention=%s", test.expectedRetention)
+		found := false
+		for _, flag := range amArgs {
+			if flag == expectedRetentionArg {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			t.Fatalf("expected Alertmanager args to contain %v, but got %v", expectedRetentionArg, amArgs)
+		}
 	}
 }
 

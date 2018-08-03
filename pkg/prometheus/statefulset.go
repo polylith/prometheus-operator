@@ -15,12 +15,9 @@
 package prometheus
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"path"
-	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1beta2"
@@ -32,21 +29,21 @@ import (
 	"github.com/blang/semver"
 	monitoringv1 "github.com/coreos/prometheus-operator/pkg/client/monitoring/v1"
 	"github.com/pkg/errors"
-	yaml "gopkg.in/yaml.v2"
 )
 
 const (
-	governingServiceName   = "prometheus-operated"
-	DefaultVersion         = "v2.2.1"
-	defaultRetention       = "24h"
-	storageDir             = "/prometheus"
-	confDir                = "/etc/prometheus/config"
-	confOutDir             = "/etc/prometheus/config_out"
-	rulesDir               = "/etc/prometheus/config_out/rules"
-	secretsDir             = "/etc/prometheus/secrets/"
-	configFilename         = "prometheus.yaml"
-	configEnvsubstFilename = "prometheus.env.yaml"
-	ruleConfigmapsFilename = "configmaps.json"
+	governingServiceName     = "prometheus-operated"
+	DefaultPrometheusVersion = "v2.3.2"
+	DefaultThanosVersion     = "v0.1.0-rc.2"
+	defaultRetention         = "24h"
+	storageDir               = "/prometheus"
+	confDir                  = "/etc/prometheus/config"
+	confOutDir               = "/etc/prometheus/config_out"
+	rulesDir                 = "/etc/prometheus/rules"
+	secretsDir               = "/etc/prometheus/secrets/"
+	configFilename           = "prometheus.yaml"
+	configEnvsubstFilename   = "prometheus.env.yaml"
+	sSetInputHashName        = "prometheus-operator-input-hash"
 )
 
 var (
@@ -75,10 +72,18 @@ var (
 		"v1.8.0",
 		"v2.0.0",
 		"v2.2.1",
+		"v2.3.1",
+		"v2.3.2",
 	}
 )
 
-func makeStatefulSet(p monitoringv1.Prometheus, old *appsv1.StatefulSet, config *Config, ruleConfigMaps []*v1.ConfigMap) (*appsv1.StatefulSet, error) {
+func makeStatefulSet(
+	p monitoringv1.Prometheus,
+	previousPodManagementPolicy appsv1.PodManagementPolicyType,
+	config *Config,
+	ruleConfigMapNames []string,
+	inputHash string,
+) (*appsv1.StatefulSet, error) {
 	// TODO(fabxc): is this the right point to inject defaults?
 	// Ideally we would do it before storing but that's currently not possible.
 	// Potentially an update handler on first insertion.
@@ -87,7 +92,11 @@ func makeStatefulSet(p monitoringv1.Prometheus, old *appsv1.StatefulSet, config 
 		p.Spec.BaseImage = config.PrometheusDefaultBaseImage
 	}
 	if p.Spec.Version == "" {
-		p.Spec.Version = DefaultVersion
+		p.Spec.Version = DefaultPrometheusVersion
+	}
+	if p.Spec.Thanos != nil && p.Spec.Thanos.Version == nil {
+		v := DefaultThanosVersion
+		p.Spec.Thanos.Version = &v
 	}
 
 	versionStr := strings.TrimLeft(p.Spec.Version, "v")
@@ -126,7 +135,7 @@ func makeStatefulSet(p monitoringv1.Prometheus, old *appsv1.StatefulSet, config 
 		}
 	}
 
-	spec, err := makeStatefulSetSpec(p, config, ruleConfigMaps)
+	spec, err := makeStatefulSetSpec(p, config, ruleConfigMapNames)
 	if err != nil {
 		return nil, errors.Wrap(err, "make StatefulSet spec")
 	}
@@ -151,6 +160,14 @@ func makeStatefulSet(p monitoringv1.Prometheus, old *appsv1.StatefulSet, config 
 		Spec: *spec,
 	}
 
+	if statefulset.ObjectMeta.Annotations == nil {
+		statefulset.ObjectMeta.Annotations = map[string]string{
+			sSetInputHashName: inputHash,
+		}
+	} else {
+		statefulset.ObjectMeta.Annotations[sSetInputHashName] = inputHash
+	}
+
 	if p.Spec.ImagePullSecrets != nil && len(p.Spec.ImagePullSecrets) > 0 {
 		statefulset.Spec.Template.Spec.ImagePullSecrets = p.Spec.ImagePullSecrets
 	}
@@ -172,28 +189,24 @@ func makeStatefulSet(p monitoringv1.Prometheus, old *appsv1.StatefulSet, config 
 		})
 	} else {
 		pvcTemplate := storageSpec.VolumeClaimTemplate
-		pvcTemplate.Name = volumeName(p.Name)
+		if pvcTemplate.Name == "" {
+			pvcTemplate.Name = volumeName(p.Name)
+		}
 		pvcTemplate.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
 		pvcTemplate.Spec.Resources = storageSpec.VolumeClaimTemplate.Spec.Resources
 		pvcTemplate.Spec.Selector = storageSpec.VolumeClaimTemplate.Spec.Selector
 		statefulset.Spec.VolumeClaimTemplates = append(statefulset.Spec.VolumeClaimTemplates, pvcTemplate)
 	}
 
-	if old != nil {
-		statefulset.Annotations = old.Annotations
-
-		// Updates to statefulset spec for fields other than 'replicas', 'template', and 'updateStrategy' are forbidden.
-		statefulset.Spec.PodManagementPolicy = old.Spec.PodManagementPolicy
-	}
+	// Updates to statefulset spec for fields other than 'replicas',
+	// 'template', and 'updateStrategy' are forbidden.
+	statefulset.Spec.PodManagementPolicy = previousPodManagementPolicy
 
 	return statefulset, nil
 }
 
-func makeEmptyConfig(p *monitoringv1.Prometheus, configMaps []*v1.ConfigMap, config Config) (*v1.Secret, error) {
-	s, err := makeConfigSecret(p, configMaps, config)
-	if err != nil {
-		return nil, err
-	}
+func makeEmptyConfigurationSecret(p *monitoringv1.Prometheus, config Config) (*v1.Secret, error) {
+	s := makeConfigSecret(p, config)
 
 	s.ObjectMeta.Annotations = map[string]string{
 		"empty": "true",
@@ -202,71 +215,7 @@ func makeEmptyConfig(p *monitoringv1.Prometheus, configMaps []*v1.ConfigMap, con
 	return s, nil
 }
 
-type ConfigMapReference struct {
-	Key      string `json:"key"`
-	Checksum string `json:"checksum"`
-}
-
-type ConfigMapReferenceList struct {
-	Items []*ConfigMapReference `json:"items"`
-}
-
-func (l *ConfigMapReferenceList) Len() int {
-	return len(l.Items)
-}
-
-func (l *ConfigMapReferenceList) Less(i, j int) bool {
-	return l.Items[i].Key < l.Items[j].Key
-}
-
-func (l *ConfigMapReferenceList) Swap(i, j int) {
-	l.Items[i], l.Items[j] = l.Items[j], l.Items[i]
-}
-
-func makeRuleConfigMap(cm *v1.ConfigMap) (*ConfigMapReference, error) {
-	keys := []string{}
-	for k, _ := range cm.Data {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	m := yaml.MapSlice{}
-	for _, k := range keys {
-		m = append(m, yaml.MapItem{Key: k, Value: cm.Data[k]})
-	}
-
-	b, err := yaml.Marshal(m)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ConfigMapReference{
-		Key:      cm.Namespace + "/" + cm.Name,
-		Checksum: fmt.Sprintf("%x", sha256.Sum256(b)),
-	}, nil
-}
-
-func makeRuleConfigMapListFile(configMaps []*v1.ConfigMap) ([]byte, error) {
-	cml := &ConfigMapReferenceList{}
-
-	for _, cm := range configMaps {
-		configmap, err := makeRuleConfigMap(cm)
-		if err != nil {
-			return nil, err
-		}
-		cml.Items = append(cml.Items, configmap)
-	}
-
-	sort.Sort(cml)
-	return json.Marshal(cml)
-}
-
-func makeConfigSecret(p *monitoringv1.Prometheus, configMaps []*v1.ConfigMap, config Config) (*v1.Secret, error) {
-	b, err := makeRuleConfigMapListFile(configMaps)
-	if err != nil {
-		return nil, err
-	}
-
+func makeConfigSecret(p *monitoringv1.Prometheus, config Config) *v1.Secret {
 	boolTrue := true
 	return &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -284,10 +233,9 @@ func makeConfigSecret(p *monitoringv1.Prometheus, configMaps []*v1.ConfigMap, co
 			},
 		},
 		Data: map[string][]byte{
-			configFilename:         []byte{},
-			ruleConfigmapsFilename: b,
+			configFilename: {},
 		},
-	}, nil
+	}
 }
 
 func makeStatefulSetService(p *monitoringv1.Prometheus, config Config) *v1.Service {
@@ -315,7 +263,7 @@ func makeStatefulSetService(p *monitoringv1.Prometheus, config Config) *v1.Servi
 	return svc
 }
 
-func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []*v1.ConfigMap) (*appsv1.StatefulSetSpec, error) {
+func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMapNames []string) (*appsv1.StatefulSetSpec, error) {
 	// Prometheus may take quite long to shut down to checkpoint existing data.
 	// Allow up to 10 minutes for clean termination.
 	terminationGracePeriod := int64(600)
@@ -327,7 +275,11 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 		return nil, errors.Wrap(err, "parse version")
 	}
 
-	var promArgs []string
+	promArgs := []string{
+		"-web.console.templates=/etc/prometheus/consoles",
+		"-web.console.libraries=/etc/prometheus/console_libraries",
+	}
+
 	var securityContext *v1.PodSecurityContext
 
 	switch version.Major {
@@ -427,7 +379,7 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 
 	localReloadURL := &url.URL{
 		Scheme: "http",
-		Host:   "localhost:9090",
+		Host:   c.LocalHost + ":9090",
 		Path:   path.Clean(webRoutePrefix + "/-/reload"),
 	}
 
@@ -448,6 +400,26 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 		},
 	}
 
+	for _, name := range ruleConfigMapNames {
+		volumes = append(volumes, v1.Volume{
+			Name: name,
+			VolumeSource: v1.VolumeSource{
+				ConfigMap: &v1.ConfigMapVolumeSource{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: name,
+					},
+				},
+			},
+		})
+	}
+
+	volName := volumeName(p.Name)
+	if p.Spec.Storage != nil {
+		if p.Spec.Storage.VolumeClaimTemplate.Name != "" {
+			volName = p.Spec.Storage.VolumeClaimTemplate.Name
+		}
+	}
+
 	promVolumeMounts := []v1.VolumeMount{
 		{
 			Name:      "config-out",
@@ -455,10 +427,17 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 			MountPath: confOutDir,
 		},
 		{
-			Name:      volumeName(p.Name),
+			Name:      volName,
 			MountPath: storageDir,
 			SubPath:   subPathForStorage(p.Spec.Storage),
 		},
+	}
+
+	for _, name := range ruleConfigMapNames {
+		promVolumeMounts = append(promVolumeMounts, v1.VolumeMount{
+			Name:      name,
+			MountPath: rulesDir + "/" + name,
+		})
 	}
 
 	for _, s := range p.Spec.Secrets {
@@ -489,11 +468,10 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 	}
 
 	configReloadArgs := []string{
+		fmt.Sprintf("--log-format=%s", c.LogFormat),
 		fmt.Sprintf("--reload-url=%s", localReloadURL),
 		fmt.Sprintf("--config-file=%s", path.Join(confDir, configFilename)),
-		fmt.Sprintf("--rule-list-file=%s", path.Join(confDir, ruleConfigmapsFilename)),
 		fmt.Sprintf("--config-envsubst-file=%s", path.Join(confOutDir, configEnvsubstFilename)),
-		fmt.Sprintf("--rule-dir=%s", rulesDir),
 	}
 
 	var livenessProbeHandler v1.Handler
@@ -563,6 +541,163 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 
 	finalLabels := c.Labels.Merge(podLabels)
 
+	additionalContainers := p.Spec.Containers
+
+	if len(ruleConfigMapNames) != 0 {
+		container := v1.Container{
+			Name:  "rules-configmap-reloader",
+			Image: c.ConfigReloaderImage,
+			Args: []string{
+				fmt.Sprintf("--webhook-url=%s", localReloadURL),
+			},
+			VolumeMounts: []v1.VolumeMount{},
+			Resources: v1.ResourceRequirements{
+				Limits: v1.ResourceList{
+					v1.ResourceCPU:    resource.MustParse("5m"),
+					v1.ResourceMemory: resource.MustParse("10Mi"),
+				},
+			},
+		}
+
+		for _, name := range ruleConfigMapNames {
+			mountPath := rulesDir + "/" + name
+			container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+				Name:      name,
+				MountPath: mountPath,
+			})
+			container.Args = append(container.Args, fmt.Sprintf("--volume-dir=%s", mountPath))
+		}
+
+		additionalContainers = append(additionalContainers, container)
+	}
+
+	if p.Spec.Thanos != nil {
+		thanosBaseImage := c.ThanosDefaultBaseImage
+		if p.Spec.Thanos.BaseImage != nil {
+			thanosBaseImage = *p.Spec.Thanos.BaseImage
+		}
+
+		thanosTag := *p.Spec.Thanos.Version
+		if p.Spec.Thanos.Tag != nil {
+			thanosTag = *p.Spec.Thanos.Tag
+		}
+
+		thanosArgs := []string{"sidecar"}
+
+		thanosArgs = append(thanosArgs, fmt.Sprintf("--prometheus.url=http://%s:9090", c.LocalHost))
+		thanosArgs = append(thanosArgs, fmt.Sprintf("--tsdb.path=%s", storageDir))
+		if p.Spec.Thanos.Peers != nil {
+			thanosArgs = append(thanosArgs, fmt.Sprintf("--cluster.peers=%s", *p.Spec.Thanos.Peers))
+		}
+		if p.Spec.LogLevel != "" && p.Spec.LogLevel != "info" {
+			thanosArgs = append(thanosArgs, fmt.Sprintf("--log.level=%s", p.Spec.LogLevel))
+		}
+
+		thanosVolumeMounts := []v1.VolumeMount{
+			{
+				Name:      volName,
+				MountPath: storageDir,
+				SubPath:   subPathForStorage(p.Spec.Storage),
+			},
+		}
+
+		envVars := []v1.EnvVar{}
+		if p.Spec.Thanos.GCS != nil {
+			if p.Spec.Thanos.GCS.Bucket != nil {
+				thanosArgs = append(thanosArgs, fmt.Sprintf("--gcs.bucket=%s", *p.Spec.Thanos.GCS.Bucket))
+			}
+			if p.Spec.Thanos.GCS.SecretKey != nil {
+				secretFileName := "service-account.json"
+				if p.Spec.Thanos.GCS.SecretKey.Name != "" {
+					secretFileName = p.Spec.Thanos.GCS.SecretKey.Name
+				}
+				secretDir := path.Join("/var/run/secrets/prometheus.io", p.Spec.Thanos.GCS.SecretKey.Key)
+				envVars = append(envVars, v1.EnvVar{
+					Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+					Value: path.Join(secretDir, secretFileName),
+				})
+				volumeName := "secret-" + p.Spec.Thanos.GCS.SecretKey.Key
+				volumes = append(volumes, v1.Volume{
+					Name: volumeName,
+					VolumeSource: v1.VolumeSource{
+						Secret: &v1.SecretVolumeSource{
+							SecretName: p.Spec.Thanos.GCS.SecretKey.Key,
+						},
+					},
+				})
+				thanosVolumeMounts = append(thanosVolumeMounts, v1.VolumeMount{
+					Name:      volumeName,
+					ReadOnly:  true,
+					MountPath: secretDir,
+				})
+			}
+		}
+
+		if p.Spec.Thanos.S3 != nil {
+			if p.Spec.Thanos.S3.Bucket != nil {
+				thanosArgs = append(thanosArgs, fmt.Sprintf("--s3.bucket=%s", *p.Spec.Thanos.S3.Bucket))
+			}
+			if p.Spec.Thanos.S3.Endpoint != nil {
+				thanosArgs = append(thanosArgs, fmt.Sprintf("--s3.endpoint=%s", *p.Spec.Thanos.S3.Endpoint))
+			}
+			if p.Spec.Thanos.S3.Insecure != nil && *p.Spec.Thanos.S3.Insecure {
+				thanosArgs = append(thanosArgs, "--s3.insecure")
+			}
+			if p.Spec.Thanos.S3.SignatureVersion2 != nil && *p.Spec.Thanos.S3.SignatureVersion2 {
+				thanosArgs = append(thanosArgs, "--s3.signature-version2")
+			}
+			if p.Spec.Thanos.S3.AccessKey != nil {
+				envVars = append(envVars, v1.EnvVar{
+					Name: "S3_ACCESS_KEY",
+					ValueFrom: &v1.EnvVarSource{
+						SecretKeyRef: p.Spec.Thanos.S3.AccessKey,
+					},
+				})
+			}
+			if p.Spec.Thanos.S3.EncryptSSE != nil && *p.Spec.Thanos.S3.EncryptSSE {
+				thanosArgs = append(thanosArgs, "--s3.encrypt-sse")
+			}
+			if p.Spec.Thanos.S3.SecretKey != nil {
+				envVars = append(envVars, v1.EnvVar{
+					Name: "S3_SECRET_KEY",
+					ValueFrom: &v1.EnvVarSource{
+						SecretKeyRef: p.Spec.Thanos.S3.SecretKey,
+					},
+				})
+			}
+		}
+
+		c := v1.Container{
+			Name:  "thanos-sidecar",
+			Image: thanosBaseImage + ":" + thanosTag,
+			Args:  thanosArgs,
+			Ports: []v1.ContainerPort{
+				{
+					Name:          "http",
+					ContainerPort: 10902,
+				},
+				{
+					Name:          "grpc",
+					ContainerPort: 10901,
+				},
+				{
+					Name:          "cluster",
+					ContainerPort: 10900,
+				},
+			},
+			Env:          envVars,
+			VolumeMounts: thanosVolumeMounts,
+		}
+
+		additionalContainers = append(additionalContainers, c)
+		promArgs = append(promArgs, "--storage.tsdb.min-block-duration=2h", "--storage.tsdb.max-block-duration=2h")
+	}
+
+	prometheusTag := p.Spec.Version
+	if p.Spec.Tag != "" {
+		prometheusTag = p.Spec.Tag
+	}
+
 	return &appsv1.StatefulSetSpec{
 		ServiceName:         governingServiceName,
 		Replicas:            p.Spec.Replicas,
@@ -582,7 +717,7 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 				Containers: append([]v1.Container{
 					{
 						Name:           "prometheus",
-						Image:          fmt.Sprintf("%s:%s", p.Spec.BaseImage, p.Spec.Version),
+						Image:          fmt.Sprintf("%s:%s", p.Spec.BaseImage, prometheusTag),
 						Ports:          ports,
 						Args:           promArgs,
 						VolumeMounts:   promVolumeMounts,
@@ -600,6 +735,7 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 								},
 							},
 						},
+						Command:      []string{"/bin/prometheus-config-reloader"},
 						Args:         configReloadArgs,
 						VolumeMounts: configReloadVolumeMounts,
 						Resources: v1.ResourceRequirements{
@@ -609,7 +745,7 @@ func makeStatefulSetSpec(p monitoringv1.Prometheus, c *Config, ruleConfigMaps []
 							},
 						},
 					},
-				}, p.Spec.Containers...),
+				}, additionalContainers...),
 				SecurityContext:               securityContext,
 				ServiceAccountName:            p.Spec.ServiceAccountName,
 				NodeSelector:                  p.Spec.NodeSelector,
